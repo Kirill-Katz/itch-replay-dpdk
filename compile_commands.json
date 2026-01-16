@@ -1,0 +1,8 @@
+[
+{
+  "directory": "/home/alderson/Projects/Mine/nic-emulation/build",
+  "command": "/usr/lib/ccache/c++  -I/home/alderson/Projects/Mine/nic-emulation/include -O3 -DNDEBUG -DNDEBUG -O3 -march=native -g -std=gnu++20 -o CMakeFiles/run.dir/src/main.cpp.o -c /home/alderson/Projects/Mine/nic-emulation/src/main.cpp",
+  "file": "/home/alderson/Projects/Mine/nic-emulation/src/main.cpp",
+  "output": "CMakeFiles/run.dir/src/main.cpp.o"
+}
+]
