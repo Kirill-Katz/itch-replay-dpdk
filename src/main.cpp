@@ -63,6 +63,7 @@ void consumer(SPSCBuffer& ring_buffer, rte_mempool* mempool, uint16_t port_id) {
         std::span dst(buffer.get() + unparsed_bytes, _2MB - unparsed_bytes);
 
         size_t read = ring_buffer.read(dst);
+
         if (!read) {
             if (!consume.load(std::memory_order_acquire)) {
                 break;
