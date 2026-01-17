@@ -175,8 +175,8 @@ inline Msg parse_itch(const std::byte* src) {
 }
 
 template<typename SpecificHandler, typename Layout, typename Msg>
-inline void parse_and_handle(const std::byte* src, SpecificHandler& handler) {
-    handler.handle(parse_itch<Layout, Msg>(src));
+inline void parse_and_handle(const std::byte* src, SpecificHandler& handler, uint16_t size) {
+    handler.handle(parse_itch<Layout, Msg>(src), size);
 }
 
 enum class MessageType {
@@ -700,7 +700,7 @@ using DirectListingCapitalRaiseLayout = std::tuple<
 class ItchParser {
 public:
     template <typename SpecificHandler>
-    void parse(std::byte const *  src, size_t len, SpecificHandler& handler);
+    size_t parse(std::byte const *  src, size_t len, SpecificHandler& handler);
 };
 
 inline uint16_t load_be16(const std::byte* p) {
@@ -708,13 +708,13 @@ inline uint16_t load_be16(const std::byte* p) {
 }
 
 template<typename SpecificHandler>
-using ParseFn = void(*)(std::byte const *, SpecificHandler&);
+using ParseFn = void(*)(std::byte const *, SpecificHandler&, uint16_t size);
 
 template<typename SpecificHandler>
-inline void ignore_message(std::byte const * src, SpecificHandler& dst) {};
+inline void ignore_message(std::byte const * src, SpecificHandler& dst, uint16_t size) {};
 
 template<typename SpecificHandler>
-ITCH_COLD static void bad_type(std::byte const * src, SpecificHandler& __) {
+ITCH_COLD static void bad_type(std::byte const * src, SpecificHandler& _, uint16_t size) {
     char c = static_cast<char>(src[0]);
     throw std::runtime_error(
         std::string("Unknown message type '") + c + "'"
@@ -730,8 +730,8 @@ consteval bool is_valid_message_type(uint8_t c) {
 
 template<typename SpecificHandler, typename Msg>
 concept HasHandle =
-    requires(SpecificHandler& h, const Msg& m) {
-        h.handle(m);
+    requires(SpecificHandler& h, const Msg& m, uint16_t size) {
+        h.handle(m, size);
     };
 
 template<typename SpecificHandler>
@@ -761,7 +761,8 @@ template<typename SpecificHandler>
 alignas(64) inline constexpr auto dispatch = make_dispatch<SpecificHandler>();
 
 template<typename SpecificHandler>
-void ItchParser::parse(std::byte const * src, size_t len, SpecificHandler& handler) {
+size_t ItchParser::parse(std::byte const * src, size_t len, SpecificHandler& handler) {
+    std::byte const * start = src;
     std::byte const * end = src + len;
 
     while (end - src >= 3) {
@@ -775,11 +776,13 @@ void ItchParser::parse(std::byte const * src, size_t len, SpecificHandler& handl
         src += 1;
 
         handler.handle_before();
-        dispatch<SpecificHandler>[raw_type](src, handler);
+        dispatch<SpecificHandler>[raw_type](src, handler, size);
         handler.handle_after();
 
         src += size - 1;
     }
+
+    return src - start;
 }
 
 #undef ITCH_MESSAGE_LIST

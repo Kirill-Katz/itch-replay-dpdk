@@ -1,4 +1,5 @@
 #include <atomic>
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <sys/mman.h>
@@ -8,10 +9,12 @@
 #include <thread>
 #include <x86intrin.h>
 
-#include "itch_parser.hpp"
 #include "spsc_buffer.hpp"
+#include "handler.hpp"
+#include "itch_parser.hpp"
 
 std::atomic<bool> consume;
+std::atomic<size_t> total_bytes = 0;
 constexpr size_t _2MB = 2*1024*1024;
 
 void reader(SPSCBuffer& ring_buffer, const std::string& itch_file_path) {
@@ -23,7 +26,6 @@ void reader(SPSCBuffer& ring_buffer, const std::string& itch_file_path) {
     }
 
     size_t size = st.st_size;
-
     void* ptr = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (ptr == MAP_FAILED) {
         std::cerr << "Map failed" << '\n';
@@ -38,23 +40,24 @@ void reader(SPSCBuffer& ring_buffer, const std::string& itch_file_path) {
         while (!ring_buffer.try_write({&src[i], len})) {
             _mm_pause();
         }
-
-        madvise(src + i, len, MADV_DONTNEED);
     }
 
     consume.store(false, std::memory_order_release);
-
     munmap(ptr, size);
     close(fd);
 }
 
 void consumer(SPSCBuffer& ring_buffer) {
     auto buffer = std::make_unique<std::byte[]>(_2MB);
-    std::span dst(buffer.get(), _2MB);
+    Handler handler;
+    ITCH::ItchParser parser;
+
+    size_t unparsed_bytes = 0;
 
     while (true) {
-        size_t read = ring_buffer.read(dst);
+        std::span dst(buffer.get() + unparsed_bytes, _2MB - unparsed_bytes);
 
+        size_t read = ring_buffer.read(dst);
         if (!read) {
             if (!consume.load(std::memory_order_acquire)) {
                 break;
@@ -63,9 +66,17 @@ void consumer(SPSCBuffer& ring_buffer) {
             continue;
         }
 
-        for (size_t i = 0; i < read; ++i) {
-            asm volatile("" ::: "memory");
+        size_t total = unparsed_bytes + read;
+        size_t parsed_bytes = parser.parse(buffer.get(), total, handler);
+        unparsed_bytes = total - parsed_bytes;
+
+        if (unparsed_bytes >= _2MB) {
+            std::cerr << "Something went seriously wrong!" << '\n';
+            std::abort();
         }
+
+        std::memmove(buffer.get(), buffer.get() + parsed_bytes, unparsed_bytes);
+        total_bytes.fetch_add(read, std::memory_order_relaxed);
     }
 }
 
@@ -78,6 +89,8 @@ int main(int argc, char** argv) {
     SPSCBuffer ring_buffer;
     consume.store(true, std::memory_order_relaxed);
 
+    auto start = std::chrono::steady_clock::now();
+
     auto reader_thread = std::thread([&ring_buffer, &itch_file_path]() {
         reader(ring_buffer, itch_file_path);
     });
@@ -88,6 +101,18 @@ int main(int argc, char** argv) {
 
     reader_thread.join();
     consumer_thread.join();
+
+    auto end = std::chrono::steady_clock::now();
+
+    double seconds = std::chrono::duration<double>(end - start).count();
+    size_t bytes = total_bytes.load();
+
+    double gb = bytes / 1e9;
+    double gbps = gb / seconds;
+
+    std::cout << "Processed: " << bytes << " bytes\n";
+    std::cout << "Time: " << seconds << " s\n";
+    std::cout << "Throughput: " << gbps << " GB/s\n";
 
     return 0;
 }
