@@ -10,7 +10,6 @@ set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(DPDK REQUIRED libdpdk)
-
 add_executable(run
     src/main.cpp
     src/spsc_buffer.cpp
