@@ -8,10 +8,11 @@
 #include <unistd.h>
 #include <thread>
 #include <x86intrin.h>
+#include <rte_eal.h>
 
 #include "spsc_buffer.hpp"
 #include "handler.hpp"
-#include "itch_parser.hpp"
+#include "itch_header_parser.hpp"
 
 std::atomic<bool> consume;
 std::atomic<size_t> total_bytes = 0;
@@ -50,7 +51,7 @@ void reader(SPSCBuffer& ring_buffer, const std::string& itch_file_path) {
 void consumer(SPSCBuffer& ring_buffer) {
     auto buffer = std::make_unique<std::byte[]>(_2MB);
     Handler handler;
-    ITCH::ItchParser parser;
+    ITCH::ItchHeaderParser parser;
 
     size_t unparsed_bytes = 0;
 
@@ -81,6 +82,14 @@ void consumer(SPSCBuffer& ring_buffer) {
 }
 
 int main(int argc, char** argv) {
+    int eal_argc = rte_eal_init(argc, argv);
+    if (eal_argc < 0) {
+        throw std::runtime_error("EAL init failed");
+    }
+
+    argc -= eal_argc;
+    argv += eal_argc;
+
     if (argc < 2) {
         throw std::runtime_error("Usage: ./run [path to itch file]");
     }
@@ -88,7 +97,6 @@ int main(int argc, char** argv) {
     std::string itch_file_path = argv[1];
     SPSCBuffer ring_buffer;
     consume.store(true, std::memory_order_relaxed);
-
     auto start = std::chrono::steady_clock::now();
 
     auto reader_thread = std::thread([&ring_buffer, &itch_file_path]() {
