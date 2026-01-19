@@ -4,7 +4,6 @@
 #include <rte_ether.h>
 #include <rte_ip4.h>
 #include <rte_udp.h>
-#include <stdexcept>
 #include <vector>
 #include <cstdint>
 #include <emmintrin.h>
@@ -114,19 +113,8 @@ inline void Handler::handle(std::byte const * msg_start, const ITCH::ItchHeader&
     } else {
         auto mold_udp_header = mold_udp_64_.generate_header(payload_msg_count_);
         const size_t payload_size = payload_.size() + mold_udp_header.size();
-        uint16_t pkt_len =
-            sizeof(rte_ether_hdr) +
-            sizeof(rte_ipv4_hdr) +
-            sizeof(rte_udp_hdr) +
-            payload_size;
-
-
         rte_mbuf* m = rte_pktmbuf_alloc(mempool_);
         std::byte* p = rte_pktmbuf_mtod(m, std::byte*);
-        if (rte_pktmbuf_tailroom(m) < pkt_len) {
-            rte_pktmbuf_free(m);
-            throw std::runtime_error("Failed to send a packet, not enough memory in the TX buffer!");
-        }
 
         add_ethernet_header(p);
         p += sizeof(rte_ether_hdr);
@@ -144,6 +132,12 @@ inline void Handler::handle(std::byte const * msg_start, const ITCH::ItchHeader&
         udp_hdr_ptr->dgram_cksum = 0;
         udp_hdr_ptr->dgram_cksum = rte_ipv4_udptcp_cksum(ipv4_hdr_ptr, udp_hdr_ptr);
 
+        uint16_t pkt_len =
+            sizeof(rte_ether_hdr) +
+            sizeof(rte_ipv4_hdr) +
+            sizeof(rte_udp_hdr) +
+            payload_size;
+
         m->data_len = pkt_len;
         m->pkt_len = pkt_len;
 
@@ -151,6 +145,10 @@ inline void Handler::handle(std::byte const * msg_start, const ITCH::ItchHeader&
         if (sent == 0) {
             rte_pktmbuf_free(m);
         }
+
+
+
+        // send message
 
         payload_.clear();
         payload_.insert(payload_.end(), msg_start, msg_start + header_size);
