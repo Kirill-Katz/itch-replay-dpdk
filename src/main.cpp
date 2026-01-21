@@ -1,6 +1,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <iostream>
 #include <rte_lcore.h>
 #include <rte_mbuf_core.h>
@@ -9,10 +10,10 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <thread>
 #include <x86intrin.h>
 #include <rte_eal.h>
 #include <rte_ethdev.h>
+#include <fstream>
 
 #include "spsc_buffer.hpp"
 #include "handler.hpp"
@@ -22,46 +23,20 @@ std::atomic<bool> consume;
 std::atomic<size_t> total_bytes = 0;
 constexpr size_t _2MB = 2*1024*1024;
 
-void reader(SPSCBuffer& ring_buffer, const std::string& itch_file_path) {
-    int fd = open(itch_file_path.data(), O_RDONLY);
-    struct stat st;
-    if(fstat(fd, &st) < 0) {
-        std::cerr << "Fstat failed" << '\n';
-        std::abort();
-    }
-
-    size_t size = st.st_size;
-    void* ptr = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (ptr == MAP_FAILED) {
-        std::cerr << "Map failed" << '\n';
-        std::abort();
-    }
-
-    madvise(ptr, size, MADV_WILLNEED | MADV_SEQUENTIAL);
-    std::byte* src = static_cast<std::byte*>(ptr);
-
-    for (size_t i = 0; i < size; i += _2MB) {
-        size_t len = std::min(_2MB, size - i);
-        while (!ring_buffer.try_write({&src[i], len})) {
-            _mm_pause();
-        }
-    }
-
-    consume.store(false, std::memory_order_release);
-    munmap(ptr, size);
-    close(fd);
-}
-
 void consumer(SPSCBuffer& ring_buffer, rte_mempool* mempool, uint16_t port_id) {
     auto buffer = std::make_unique<std::byte[]>(_2MB);
     Handler handler(mempool, port_id);
     ITCH::ItchHeaderParser parser;
 
+    std::ofstream out("../data/itch_out_producer",
+                  std::ios::binary | std::ios::out | std::ios::trunc);
+    std::vector<char> buf;
+    buf.reserve(1<<20);
+
     size_t unparsed_bytes = 0;
 
     while (true) {
         std::span dst(buffer.get() + unparsed_bytes, _2MB - unparsed_bytes);
-
         size_t read = ring_buffer.read(dst);
 
         if (!read) {
@@ -71,6 +46,8 @@ void consumer(SPSCBuffer& ring_buffer, rte_mempool* mempool, uint16_t port_id) {
             _mm_pause();
             continue;
         }
+
+        out.write(reinterpret_cast<char*>(dst.data()), read);
 
         size_t total = unparsed_bytes + read;
         size_t parsed_bytes = parser.parse(buffer.get(), total, handler);
@@ -84,6 +61,8 @@ void consumer(SPSCBuffer& ring_buffer, rte_mempool* mempool, uint16_t port_id) {
         std::memmove(buffer.get(), buffer.get() + parsed_bytes, unparsed_bytes);
         total_bytes.fetch_add(read, std::memory_order_relaxed);
     }
+
+    out.flush();
 }
 
 int main(int argc, char** argv) {
@@ -118,20 +97,34 @@ int main(int argc, char** argv) {
     }
 
     std::string itch_file_path = argv[1];
-    SPSCBuffer ring_buffer;
     consume.store(true, std::memory_order_relaxed);
     auto start = std::chrono::steady_clock::now();
 
-    auto reader_thread = std::thread([&ring_buffer, &itch_file_path]() {
-        reader(ring_buffer, itch_file_path);
-    });
+    int fd = open(itch_file_path.data(), O_RDONLY);
+    struct stat st;
+    if(fstat(fd, &st) < 0) {
+        std::cerr << "Fstat failed" << '\n';
+        std::abort();
+    }
 
-    auto consumer_thread = std::thread([&]() {
-        consumer(ring_buffer, pool, port_id);
-    });
+    size_t size = st.st_size;
+    void* ptr = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (ptr == MAP_FAILED) {
+        std::cerr << "Map failed" << '\n';
+        std::abort();
+    }
 
-    reader_thread.join();
-    consumer_thread.join();
+    madvise(ptr, size, MADV_WILLNEED | MADV_SEQUENTIAL);
+    std::byte* src = static_cast<std::byte*>(ptr);
+
+    Handler handler(pool, port_id);
+    ITCH::ItchHeaderParser parser;
+
+    parser.parse(src, size, handler);
+    handler.send_buffer();
+
+    munmap(ptr, size);
+    close(fd);
 
     auto end = std::chrono::steady_clock::now();
 

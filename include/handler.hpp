@@ -17,7 +17,7 @@
 class Handler {
 public:
     Handler(rte_mempool* mempool, uint16_t port):
-        mold_udp_64_("ITCHFEED00", 0),
+        mold_udp_64_("ITCHFEED00", 1),
         mempool_(mempool),
         port_(port)
     {
@@ -25,12 +25,13 @@ public:
         setup_headers();
     }
 
-    inline void handle(std::byte const * msg_start, const ITCH::ItchHeader& header, uint16_t header_size);
-    inline void generate_network_headers(size_t payload_len);
-    inline void setup_headers();
-    inline void add_ethernet_header(std::byte * dst);
-    inline rte_ipv4_hdr* add_ipv4_headers(std::byte * dst, size_t payload_size);
-    inline rte_udp_hdr* add_udp_headers(std::byte * dst, size_t payload_size);
+    void handle(std::byte const * msg_start, const ITCH::ItchHeader& header, uint16_t header_size);
+    void generate_network_headers(size_t payload_len);
+    void setup_headers();
+    void add_ethernet_header(std::byte * dst);
+    rte_ipv4_hdr* add_ipv4_headers(std::byte * dst, size_t payload_size);
+    rte_udp_hdr* add_udp_headers(std::byte * dst, size_t payload_size);
+    void send_buffer();
 
 private:
     uint64_t last_timestamp_ = 0;
@@ -63,7 +64,7 @@ inline void Handler::setup_headers() {
     ipv4_hdr_.version_ihl = (4 << 4) | 5;
     ipv4_hdr_.type_of_service = 0;
     // not changed to be because the payload size will be added as well and then converted to be
-    ipv4_hdr_.total_length = sizeof(rte_ipv4_hdr) + sizeof(rte_udp_hdr);
+    ipv4_hdr_.total_length = 0;
 
     ipv4_hdr_.packet_id = 0;
     ipv4_hdr_.fragment_offset = 0;
@@ -80,7 +81,7 @@ inline void Handler::setup_headers() {
     udp_hdr_.dst_port = rte_cpu_to_be_16(7788);
 
     // will be converted to be when the payload_size is added
-    udp_hdr_.dgram_len = sizeof(rte_udp_hdr);
+    udp_hdr_.dgram_len = 0;
     udp_hdr_.dgram_cksum = 0; // checksum will be computed when payload_length and payload will be known
 }
 
@@ -90,7 +91,12 @@ inline void Handler::add_ethernet_header(std::byte * dst) {
 
 inline rte_ipv4_hdr* Handler::add_ipv4_headers(std::byte* dst, size_t payload_size) {
     struct rte_ipv4_hdr ipv4_hdr = ipv4_hdr_;
-    ipv4_hdr.total_length = rte_cpu_to_be_16(ipv4_hdr.total_length + payload_size);
+    ipv4_hdr.total_length = rte_cpu_to_be_16(
+        sizeof(rte_ipv4_hdr) +
+        sizeof(rte_udp_hdr) +
+        payload_size
+    );
+
     ipv4_hdr.hdr_checksum = rte_ipv4_cksum(&ipv4_hdr);
     std::memcpy(dst, &ipv4_hdr, sizeof(rte_ipv4_hdr));
     rte_ipv4_hdr* ipv4_hdr_ptr = reinterpret_cast<rte_ipv4_hdr*>(dst);
@@ -100,62 +106,73 @@ inline rte_ipv4_hdr* Handler::add_ipv4_headers(std::byte* dst, size_t payload_si
 
 inline rte_udp_hdr* Handler::add_udp_headers(std::byte* dst, size_t payload_size) {
     struct rte_udp_hdr udp_hdr = udp_hdr_;
-    udp_hdr.dgram_len = rte_cpu_to_be_16(udp_hdr_.dgram_len + payload_size);
+    udp_hdr.dgram_len = rte_cpu_to_be_16(
+        sizeof(rte_udp_hdr) + payload_size
+    );
+
     std::memcpy(dst, &udp_hdr, sizeof(rte_udp_hdr));
     rte_udp_hdr* udp_hdr_ptr = reinterpret_cast<rte_udp_hdr*>(dst);
     return udp_hdr_ptr;
 }
 
-inline void Handler::handle(std::byte const * msg_start, const ITCH::ItchHeader& header, uint16_t header_size) {
-    // sending a MoldUDP64 with msg_count set to 0 as the first message is intended, as such a message
-    // is treated as a hearthbeat.
-    if (header.timestamp == last_timestamp_) {
-        payload_.insert(payload_.end(), msg_start, msg_start + header_size);
-        payload_msg_count_++;
-    } else {
-        auto mold_udp_header = mold_udp_64_.generate_header(payload_msg_count_);
-        const size_t payload_size = payload_.size() + mold_udp_header.size();
-        uint16_t pkt_len =
-            sizeof(rte_ether_hdr) +
-            sizeof(rte_ipv4_hdr) +
-            sizeof(rte_udp_hdr) +
-            payload_size;
+inline void Handler::send_buffer() {
+    auto mold_udp_header = mold_udp_64_.generate_header(payload_msg_count_);
+    const size_t payload_size = payload_.size() + mold_udp_header.size();
+    size_t pkt_len =
+        sizeof(rte_ether_hdr) +
+        sizeof(rte_ipv4_hdr) +
+        sizeof(rte_udp_hdr) +
+        payload_size;
 
+    rte_mbuf* m = rte_pktmbuf_alloc(mempool_);
+    if (!m) {
+        throw std::runtime_error("Failed to allocate a pkt buffer!");
+    }
 
-        rte_mbuf* m = rte_pktmbuf_alloc(mempool_);
-        std::byte* p = rte_pktmbuf_mtod(m, std::byte*);
-        if (rte_pktmbuf_tailroom(m) < pkt_len) {
-            rte_pktmbuf_free(m);
-            throw std::runtime_error("Failed to send a packet, not enough memory in the TX buffer!");
-        }
+    std::byte* p = rte_pktmbuf_mtod(m, std::byte*);
+    if (rte_pktmbuf_tailroom(m) < pkt_len) {
+        rte_pktmbuf_free(m);
+        std::cerr << pkt_len << '\n';
+        throw std::runtime_error("Failed to send a packet, not enough memory in the TX buffer!");
+    }
 
-        add_ethernet_header(p);
-        p += sizeof(rte_ether_hdr);
+    add_ethernet_header(p);
+    p += sizeof(rte_ether_hdr);
 
-        rte_ipv4_hdr* ipv4_hdr_ptr = add_ipv4_headers(p, payload_size);
-        p += sizeof(rte_ipv4_hdr);
+    rte_ipv4_hdr* ipv4_hdr_ptr = add_ipv4_headers(p, payload_size);
+    p += sizeof(rte_ipv4_hdr);
 
-        rte_udp_hdr* udp_hdr_ptr = add_udp_headers(p, payload_size);
-        p += sizeof(rte_udp_hdr);
+    rte_udp_hdr* udp_hdr_ptr = add_udp_headers(p, payload_size);
+    p += sizeof(rte_udp_hdr);
 
-        std::memcpy(p, mold_udp_header.data(), mold_udp_header.size());
-        p += mold_udp_header.size();
+    std::memcpy(p, mold_udp_header.data(), mold_udp_header.size());
+    p += mold_udp_header.size();
 
-        std::memcpy(p, payload_.data(), payload_.size());
-        udp_hdr_ptr->dgram_cksum = 0;
-        udp_hdr_ptr->dgram_cksum = rte_ipv4_udptcp_cksum(ipv4_hdr_ptr, udp_hdr_ptr);
+    std::memcpy(p, payload_.data(), payload_.size());
+    udp_hdr_ptr->dgram_cksum = 0;
+    udp_hdr_ptr->dgram_cksum = rte_ipv4_udptcp_cksum(ipv4_hdr_ptr, udp_hdr_ptr);
 
-        m->data_len = pkt_len;
-        m->pkt_len = pkt_len;
+    m->data_len = pkt_len;
+    m->pkt_len = pkt_len;
 
-        uint16_t sent = rte_eth_tx_burst(port_, 0, &m, 1);
-        if (sent == 0) {
-            rte_pktmbuf_free(m);
-        }
+    while (rte_eth_tx_burst(port_, 0, &m, 1) == 0) {
+        _mm_pause();
+    }
+}
 
-        std::cout << "Sent a packet!" << '\n';
+static uint64_t total_messages_len = 0;
+inline void Handler::handle(std::byte const * msg_start, const ITCH::ItchHeader& header, uint16_t message_size) {
+    total_messages_len += message_size;
+
+    bool is_last_message = header.type == 'S' && static_cast<char>(*(msg_start + 13)) == 'C';
+    payload_.insert(payload_.end(), msg_start, msg_start + message_size);
+    payload_msg_count_++;
+
+    bool should_send = payload_msg_count_ == 20 || is_last_message;
+    if (should_send) {
+        send_buffer();
         payload_.clear();
-        payload_.insert(payload_.end(), msg_start, msg_start + header_size);
-        payload_msg_count_ = 1;
+        payload_msg_count_ = 0;
+        std::cout << total_messages_len << '\n';
     }
 }
