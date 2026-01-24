@@ -1,18 +1,19 @@
 #pragma once
 
+#include <iostream>
+
 #include <rte_ethdev.h>
 #include <rte_ether.h>
 #include <rte_ip4.h>
-#include <iostream>
 #include <rte_udp.h>
 #include <stdexcept>
 #include <vector>
 #include <cstdint>
 #include <emmintrin.h>
 #include <x86intrin.h>
+#include <rte_mbuf_core.h>
 #include "itch_header_parser.hpp"
 #include "mold_udp_64.hpp"
-#include <rte_mbuf_core.h>
 
 class Handler {
 public:
@@ -31,7 +32,8 @@ public:
     void add_ethernet_header(std::byte * dst);
     rte_ipv4_hdr* add_ipv4_headers(std::byte * dst, size_t payload_size);
     rte_udp_hdr* add_udp_headers(std::byte * dst, size_t payload_size);
-    void send_buffer();
+    void queue_packet();
+    void send_packets();
 
 private:
     uint64_t last_timestamp_ = 0;
@@ -39,8 +41,14 @@ private:
 
     std::vector<std::byte> payload_;
     uint16_t payload_msg_count_ = 0;
+
+    static constexpr size_t packet_queue_size = 64;
+    std::array<rte_mbuf*, packet_queue_size> buffers_;
+    uint64_t queued_packets_ = 0;
+
     rte_mempool* mempool_;
     uint16_t port_;
+    uint64_t total_messages_len = 0;
 
     struct rte_ipv4_hdr ipv4_hdr_;
     struct rte_ether_hdr ethernet_hdr_;
@@ -115,7 +123,7 @@ inline rte_udp_hdr* Handler::add_udp_headers(std::byte* dst, size_t payload_size
     return udp_hdr_ptr;
 }
 
-inline void Handler::send_buffer() {
+inline void Handler::queue_packet() {
     auto mold_udp_header = mold_udp_64_.generate_header(payload_msg_count_);
     const size_t payload_size = payload_.size() + mold_udp_header.size();
     size_t pkt_len =
@@ -151,12 +159,24 @@ inline void Handler::send_buffer() {
     udp_hdr_ptr->dgram_cksum = 0;
     udp_hdr_ptr->dgram_cksum = rte_ipv4_udptcp_cksum(ipv4_hdr_ptr, udp_hdr_ptr);
 
-    while (rte_eth_tx_burst(port_, 0, &m, 1) == 0) {
-        rte_pause();
+    buffers_[queued_packets_] = m;
+    queued_packets_++;
+}
+
+inline void Handler::send_packets() {
+    size_t base = 0;
+    while (queued_packets_ > 0) {
+        auto sent_packets = rte_eth_tx_burst(port_, 0, buffers_.data() + base, queued_packets_);
+        if (sent_packets == 0) {
+            rte_pause();
+            continue;
+        }
+
+        queued_packets_ -= sent_packets;
+        base += sent_packets;
     }
 }
 
-static uint64_t total_messages_len = 0;
 inline void Handler::handle(std::byte const * msg_start, const ITCH::ItchHeader& header, uint16_t message_size) {
     total_messages_len += message_size;
 
@@ -164,13 +184,15 @@ inline void Handler::handle(std::byte const * msg_start, const ITCH::ItchHeader&
     payload_.insert(payload_.end(), msg_start, msg_start + message_size);
     payload_msg_count_++;
 
-    bool should_send = payload_msg_count_ == 20 || is_last_message;
-    if (should_send) {
-        send_buffer();
+    bool should_pack = payload_.size() >= 1400 || is_last_message;
+    if (should_pack) {
+        queue_packet();
         payload_.clear();
         payload_msg_count_ = 0;
-        std::cout << total_messages_len << '\n';
     }
 
-
+    bool should_send = queued_packets_ == packet_queue_size || is_last_message;
+    if (should_send) {
+        send_packets();
+    }
 }

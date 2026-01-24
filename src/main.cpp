@@ -79,10 +79,10 @@ int main(int argc, char** argv) {
     uint16_t port_id = 0;
     rte_mempool* pool = rte_pktmbuf_pool_create(
         "mbuf_pool",
-        8192,
+        16383,
         256,
         0,
-        RTE_MBUF_DEFAULT_BUF_SIZE,
+        RTE_PKTMBUF_HEADROOM + 8192,
         rte_socket_id()
     );
 
@@ -107,11 +107,11 @@ int main(int argc, char** argv) {
     rte_eth_rxconf rxconf = dev_info.default_rxconf;
     rxconf.offloads = 0;
 
-    if (rte_eth_tx_queue_setup(port_id, 0, 1024,
+    if (rte_eth_tx_queue_setup(port_id, 0, 2048,
                                rte_socket_id(), &txconf) != 0)
         throw std::runtime_error("tx queue failed");
 
-    if (rte_eth_rx_queue_setup(port_id, 0, 1024,
+    if (rte_eth_rx_queue_setup(port_id, 0, 2048,
                                rte_socket_id(), &rxconf, pool) != 0)
         throw std::runtime_error("rx queue failed");
 
@@ -138,7 +138,6 @@ int main(int argc, char** argv) {
 
     std::string itch_file_path = argv[1];
     consume.store(true, std::memory_order_relaxed);
-    auto start = std::chrono::steady_clock::now();
 
     int fd = open(itch_file_path.data(), O_RDONLY);
     struct stat st;
@@ -157,6 +156,7 @@ int main(int argc, char** argv) {
     madvise(ptr, size, MADV_WILLNEED | MADV_SEQUENTIAL);
     std::byte* src = static_cast<std::byte*>(ptr);
 
+    auto start = std::chrono::steady_clock::now();
     Handler handler(pool, port_id);
     ITCH::ItchHeaderParser parser;
 
