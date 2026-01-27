@@ -42,7 +42,7 @@ private:
     std::vector<std::byte> payload_;
     uint16_t payload_msg_count_ = 0;
 
-    static constexpr size_t packet_queue_size = 64;
+    static constexpr size_t packet_queue_size = 512;
     std::array<rte_mbuf*, packet_queue_size> buffers_;
     uint64_t queued_packets_ = 0;
 
@@ -176,6 +176,7 @@ inline void Handler::send_packets() {
     while (queued_packets_ > 0) {
         auto sent_packets = rte_eth_tx_burst(port_, 0, buffers_.data() + base, queued_packets_);
         if (sent_packets == 0) {
+            rte_pause();
             continue;
         }
 
