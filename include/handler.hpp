@@ -42,7 +42,7 @@ private:
     std::vector<std::byte> payload_;
     uint16_t payload_msg_count_ = 0;
 
-    static constexpr size_t packet_queue_size = 512;
+    static constexpr size_t packet_queue_size = 64;
     std::array<rte_mbuf*, packet_queue_size> buffers_;
     uint64_t queued_packets_ = 0;
 

@@ -79,7 +79,7 @@ int main(int argc, char** argv) {
     uint16_t port_id = 0;
     rte_mempool* pool = rte_pktmbuf_pool_create(
         "mbuf_pool",
-        32367,
+        1024,
         256,
         0,
         RTE_PKTMBUF_HEADROOM + 2048,
@@ -107,27 +107,16 @@ int main(int argc, char** argv) {
     rte_eth_rxconf rxconf = dev_info.default_rxconf;
     rxconf.offloads = 0;
 
-    if (rte_eth_tx_queue_setup(port_id, 0, 8092,
+    if (rte_eth_tx_queue_setup(port_id, 0, 1024,
                                rte_socket_id(), &txconf) != 0)
         throw std::runtime_error("tx queue failed");
 
-    if (rte_eth_rx_queue_setup(port_id, 0, 8092,
+    if (rte_eth_rx_queue_setup(port_id, 0, 1024,
                                rte_socket_id(), &rxconf, pool) != 0)
         throw std::runtime_error("rx queue failed");
 
     if (rte_eth_dev_start(port_id) < 0)
         throw std::runtime_error("dev start failed");
-
-    struct rte_eth_link link;
-    std::cout << "Waiting for link!" << '\n';
-    do {
-        int ret = rte_eth_link_get_nowait(0, &link);
-        if (ret != 0) {
-            throw std::runtime_error("Failed to get link!");
-        }
-        rte_pause();
-    } while(!link.link_status);
-    std::cout << "Link UP!" << '\n';
 
     argc -= eal_argc;
     argv += eal_argc;
